@@ -1,12 +1,16 @@
 name: CI
 
-# Runs on every push to a branch and every PR. This is the gate that catches a
-# broken build before it reaches main, so a type error is never in the history
-# with the only fix being a follow-up commit.
+# Runs on every push and every PR, INCLUDING pushes to main.
+#
+# WHY main IS NOT EXCLUDED (unlike the other bb plugin repos)
+#
+# Those repos exclude main because a merge triggers a publish workflow, and CI
+# on main would be redundant. This repo has no publish workflow and no other
+# gate, so excluding main would mean the default branch is the ONE branch that
+# is never verified - a direct push or a fast-forward merge could land a broken
+# build with nothing to catch it.
 on:
   push:
-    branches-ignore:
-      - main
   pull_request:
 
 # A newer push to the same branch makes an in-flight run obsolete.
