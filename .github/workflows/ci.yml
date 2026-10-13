@@ -1,0 +1,154 @@
+name: CI
+
+# Runs on every push to a branch and every PR. This is the gate that catches a
+# broken build before it reaches main, so a type error is never in the history
+# with the only fix being a follow-up commit.
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+
+# A newer push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: every job here only reads the repo. Declaring it explicitly
+# means a compromised dependency in the build cannot use the default token to
+# write back to the repository.
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the Node version BB 0.44 bundles, so a type or runtime
+          # difference between CI and a real BB host shows up here. `node:sqlite`
+          # needs Node >= 22.5, and this plugin depends on it.
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+  # The artifact is the real deliverable. A plugin can typecheck and still fail
+  # `bb plugin build` (a bad bb.* manifest path, a missing entry file), and that
+  # failure would otherwise only surface when someone tried to install it.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install the BB CLI
+        run: npm install --global bb-app@0.44.0
+
+      - name: Build the plugin
+        run: bb plugin build
+
+      # Assert the artifacts exist rather than trusting the exit code alone.
+      - name: Assert build artifacts exist
+        run: |
+          set -euo pipefail
+          for f in dist/server.js dist/server.meta.json; do
+            test -s "$f" || { echo "missing or empty: $f"; exit 1; }
+            echo "ok: $f"
+          done
+
+      # The manifest is what BB uses to decide the plugin id and whether it can
+      # load the artifact at all. A wrong id here is a silent misroute: the
+      # section would never be discovered.
+      - name: Assert the manifest declares the expected plugin id
+        run: |
+          set -euo pipefail
+          node -e '
+            const meta = require("./dist/server.meta.json");
+            const want = "statusbar-usage";
+            if (meta.pluginId !== want) {
+              console.error(`pluginId is ${meta.pluginId}, expected ${want}`);
+              process.exit(1);
+            }
+            console.log(`ok: pluginId=${meta.pluginId} sdk=${meta.sdkVersion}`);
+          '
+
+  # The plugin reads another plugin's database and is developed on machines
+  # holding live API keys. A committed credential would be a real incident, and
+  # review does not reliably catch a 40-character random string, so it is
+  # asserted rather than trusted.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Scan the full history, not just the tip: a secret that was committed
+          # and later deleted is still leaked, and still rotatable, and grep of
+          # the working tree would call that clean.
+          fetch-depth: 0
+
+      - name: Scan tracked files for secrets and credential paths
+        run: ./scripts/check-secrets.sh
+
+      # A secret that was committed and then removed stays in history forever.
+      # This is the check that catches the "oops, undo the commit" case, which
+      # the working-tree scan above cannot see by design.
+      - name: Scan the full history for known credential formats
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            echo "::error::known credential format in git history: $line"
+            found=1
+          done < <(git log -p --all -S'sk-or-v1-' --oneline \
+            | grep -E '^\+.*sk-or-v1-[0-9a-fA-F]{32,}' || true)
+          if [ "$found" -ne 0 ]; then
+            echo "A credential appears in history. Rotate it." >&2
+            exit 1
+          fi
+          echo "ok: no OpenRouter key format found in history"
+
+  # Nothing in this repo needs network access at runtime or a native module, and
+  # both would be a supply-chain and portability regression worth noticing.
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert no native build step is introduced
+        run: |
+          set -euo pipefail
+          # node:sqlite is a Node built-in on purpose. A native module (e.g.
+          # better-sqlite3) would need a build toolchain on every host that
+          # installs the plugin, which is exactly what this avoids.
+          if grep -qE '"better-sqlite3"' package.json && \
+             ! grep -q '"//devDependencies"' package.json; then
+            echo "better-sqlite3 must not be a runtime dependency" >&2
+            exit 1
+          fi
+          echo "ok: no native runtime dependency"
+
+      - name: Assert the plugin ships a server entry point
+        run: |
+          set -euo pipefail
+          node -e '
+            const pkg = require("./package.json");
+            if (!pkg.bb || !pkg.bb.server) {
+              console.error("package.json bb.server is missing");
+              process.exit(1);
+            }
+            console.log(`ok: bb.server=${pkg.bb.server}`);
+          '
