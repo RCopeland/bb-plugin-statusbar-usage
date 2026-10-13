@@ -253,10 +253,19 @@ export function readUsageSection(store: UsageStore, now: Date = new Date()): Sec
   try {
     return toSection(store.read(now));
   } catch (error) {
+    const message = (error as Error).message;
+    // A missing store is by far the most likely failure, and it means exactly
+    // one thing: the Usage plugin is not installed (or has not synced yet).
+    // Say that, rather than making the reader infer it from a SQLite error
+    // string. Every other failure keeps the raw message, because the raw
+    // message is the useful part there.
+    const missing = /unable to open database file/i.test(message);
     return unavailableSection({
       topic: TOPIC,
       status: "error",
-      detail: `Usage store unreadable: ${(error as Error).message}`,
+      detail: missing
+        ? "Usage plugin not installed — no store at ~/.bb/plugins/usage/data.db"
+        : `Usage store unreadable: ${message}`,
     });
   }
 }

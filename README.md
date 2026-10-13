@@ -34,11 +34,41 @@ bb plugin install . --yes
 Requirements:
 
 - **bb ≥ 0.44** (see `engines`).
-- The **Statusbar** plugin installed and running.
-- The **Usage** plugin (`bb-plugin-usage`) installed and syncing. Without it
-  there is no store to read and the section degrades to a visible label rather
-  than a number.
+- The **Usage** plugin — required, see below.
+- The **Statusbar** plugin installed and running. This is what renders the
+  section; without it nothing calls this plugin.
 - Node ≥ 22.5 on the bb server, for `node:sqlite`. bb 0.44 ships a modern Node.
+
+## This plugin requires bb-plugin-usage
+
+**`bb-plugin-usage` must be installed and syncing. It is not optional.**
+
+This plugin has no data source of its own. It does not read agent logs, does
+not price tokens, and keeps no history. It reads the SQLite store that the
+Usage plugin writes, and there is nothing to show until that plugin has run and
+populated it.
+
+```sh
+# Install the Usage plugin first, if it is not already present.
+bb plugin install git:https://github.com/MayankBansal12/bb-plugin-usage.git@main --yes
+```
+
+Without it, the section is still *correct* — it renders
+`Usage plugin not installed — no store at ~/.bb/plugins/usage/data.db` rather
+than a wrong number or a blank bar. That is deliberate degradation, not a
+working installation. A visible error label means **you are missing the
+dependency**, not that this plugin is broken.
+
+The store lives at `~/.bb/plugins/usage/data.db` by default. If the Usage
+plugin is installed but the file is somewhere else, this plugin cannot find it:
+there is no setting for the path, unlike `bb-plugin-usage-footer`.
+
+### Why it depends on another plugin
+
+Because the Usage plugin already backfills and prices every agent log on this
+machine. Re-deriving cost independently would produce a second number that
+silently disagrees with the Usage panel, and two numbers that disagree are worse
+than one number that is occasionally missing.
 
 ## It claims the built-in `usage` topic
 
